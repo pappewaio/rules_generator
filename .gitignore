@@ -1,0 +1,31 @@
+# Input directories
+generate_rules_input/
+
+# Output directories
+out_rule_generation/
+out/
+
+# Log files
+*.log
+logs/
+
+# R specific
+.Rproj.user/
+.Rhistory
+.RData
+*.Rproj
+
+# Input data files (keep sample data, ignore real data)
+*.xlsx
+*.csv
+!tests/data/*.xlsx
+
+# System files
+.DS_Store
+**/.DS_Store
+**/*.swp
+*~
+
+# Temporary files
+tmp/
+temp/
