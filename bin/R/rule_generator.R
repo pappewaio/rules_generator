@@ -27,34 +27,48 @@ filter_incomplete_entries <- function(gene_list, output_dir, logger) {
   filtered_entries <- data.frame()
   exclusion_reasons <- character()
   
-  # Check each essential field and collect incomplete entries
-  for (i in 1:nrow(gene_list)) {
-    row_data <- gene_list[i, ]
-    missing_fields <- character()
-    
-    # Check each essential field
-    for (field in essential_fields) {
-      if (field %in% colnames(gene_list)) {
-        value <- row_data[[field]]
-        if (is.na(value) || value == "" || trimws(value) == "") {
-          missing_fields <- c(missing_fields, field)
-        }
-      } else {
-        missing_fields <- c(missing_fields, paste0(field, " (column not found)"))
-      }
+  # Vectorized approach: check all fields at once for all rows
+  # Create boolean matrix for missing values across all essential fields
+  missing_matrix <- matrix(FALSE, nrow = nrow(gene_list), ncol = length(essential_fields))
+  colnames(missing_matrix) <- essential_fields
+  
+  # Check each essential field vectorized
+  for (field in essential_fields) {
+    if (field %in% colnames(gene_list)) {
+      field_values <- gene_list[[field]]
+      # Vectorized check for missing, empty, or whitespace-only values
+      missing_matrix[, field] <- is.na(field_values) | field_values == "" | trimws(field_values) == ""
+    } else {
+      # If column doesn't exist, mark all rows as missing for this field
+      missing_matrix[, field] <- TRUE
     }
-    
-    # If any essential fields are missing, mark for exclusion
-    if (length(missing_fields) > 0) {
-      exclusion_reason <- paste("Missing essential field(s):", paste(missing_fields, collapse = ", "))
+  }
+  
+  # Find rows with any missing essential fields
+  rows_with_missing <- which(rowSums(missing_matrix) > 0)
+  
+  # Process only the rows that have missing fields
+  if (length(rows_with_missing) > 0) {
+    for (i in rows_with_missing) {
+      # Get missing fields for this row
+      missing_fields_for_row <- essential_fields[missing_matrix[i, ]]
+      
+      # Add "(column not found)" suffix for fields where column doesn't exist
+      missing_fields_formatted <- ifelse(
+        missing_fields_for_row %in% colnames(gene_list),
+        missing_fields_for_row,
+        paste0(missing_fields_for_row, " (column not found)")
+      )
+      
+      exclusion_reason <- paste("Missing essential field(s):", paste(missing_fields_formatted, collapse = ", "))
       
       # Create filtered entry record
       filtered_entry <- data.frame(
         Row_Number = i,
-        Gene = ifelse("Gene" %in% colnames(gene_list), as.character(row_data[["Gene"]]), "N/A"),
-        Disease = ifelse("Disease" %in% colnames(gene_list), as.character(row_data[["Disease"]]), "N/A"),
-        Inheritance = ifelse("Inheritance" %in% colnames(gene_list), as.character(row_data[["Inheritance"]]), "N/A"),
-        Variants_To_Find = ifelse("Variants.To.Find" %in% colnames(gene_list), as.character(row_data[["Variants.To.Find"]]), "N/A"),
+        Gene = ifelse("Gene" %in% colnames(gene_list), as.character(gene_list[i, "Gene"]), "N/A"),
+        Disease = ifelse("Disease" %in% colnames(gene_list), as.character(gene_list[i, "Disease"]), "N/A"),
+        Inheritance = ifelse("Inheritance" %in% colnames(gene_list), as.character(gene_list[i, "Inheritance"]), "N/A"),
+        Variants_To_Find = ifelse("Variants.To.Find" %in% colnames(gene_list), as.character(gene_list[i, "Variants.To.Find"]), "N/A"),
         Exclusion_Reason = exclusion_reason,
         stringsAsFactors = FALSE
       )
