@@ -136,18 +136,15 @@ copy_input_files <- function(version_dir, gene_list_path, variant_list_path, var
         }
       }
       
-      # Check for config in order of preference: version-specific, then default
+      # Config must come from the version-specific input directory - no fallback
       config_source_dir <- NULL
-      default_config_dir <- "config"  # Repo root config directory
       
       if (!is.null(source_input_config_dir) && dir.exists(source_input_config_dir)) {
         config_source_dir <- source_input_config_dir
         log_info(logger, paste("Using step-specific config from:", source_input_config_dir))
-      } else if (dir.exists(default_config_dir)) {
-        config_source_dir <- default_config_dir
-        log_info(logger, paste("Using default config from:", default_config_dir))
       } else {
-        log_warning(logger, paste("No config directory found to copy. Checked:", source_input_config_dir, "and", default_config_dir))
+        stop(paste("No config directory found at:", source_input_config_dir,
+                    "\nEach version must have its own config in generate_rules_input/version_XX/[step_XXx/]config/"))
       }
       
       if (dir.exists(config_source_dir)) {

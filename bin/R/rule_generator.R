@@ -843,8 +843,15 @@ generate_rules <- function(master_gene_list, variant_list, cutoff_list, config, 
   log_step(trace, "Initialization", "Starting rules generation process", 0, 0, 
            paste("Processing", nrow(gene_list), "genes across", length(unique(gene_list$Disease)), "diseases"))
   
-  for (disease_name in unique(gene_list$Disease)) {
-    gene_list_here <- gene_list[gene_list$Disease == disease_name, ]
+  # OPTIMIZATION: Pre-split gene_list by disease once, instead of
+  # subsetting gene_list[gene_list$Disease == disease_name, ] on every iteration.
+  # split() builds all subsets in a single pass over the data.
+  # Preserve original disease order (unique preserves first-occurrence order).
+  disease_order <- unique(gene_list$Disease)
+  gene_lists_by_disease <- split(gene_list, gene_list$Disease)
+  
+  for (disease_name in disease_order) {
+    gene_list_here <- gene_lists_by_disease[[disease_name]]
     log_info(logger, paste("Processing disease:", disease_name, "with", nrow(gene_list_here), "genes"))
     
     # Log disease processing start
