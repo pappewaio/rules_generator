@@ -6,37 +6,6 @@
   if (is.null(x)) y else x
 }
 
-#' Get script directory in a robust way
-#' @return Path to the directory containing the script
-get_script_dir <- function() {
-  if (interactive()) {
-    return(getwd())
-  } else {
-    # Try different methods to get script path
-    script_path <- NULL
-    
-    # Method 1: try sys.frame (works when called from source)
-    tryCatch({
-      script_path <- sys.frame(1)$ofile
-    }, error = function(e) {})
-    
-    # Method 2: try commandArgs (works when run with Rscript)
-    if (is.null(script_path)) {
-      tryCatch({
-        args <- commandArgs(trailingOnly = FALSE)
-        script_path <- sub("--file=", "", args[grep("--file=", args)])
-      }, error = function(e) {})
-    }
-    
-    # Method 3: fallback to current directory
-    if (is.null(script_path) || length(script_path) == 0) {
-      script_path <- "generate_rules.R"
-    }
-    
-    return(dirname(script_path))
-  }
-}
-
 #' Create version directory structure with nested step-wise support
 #' @param output_dir Base output directory
 #' @param version Version identifier (e.g., "85", "85A", "85B")
