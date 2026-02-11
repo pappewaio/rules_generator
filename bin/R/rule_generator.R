@@ -412,6 +412,7 @@ process_variantcall_database <- function(variantcall_data, cID_lookup, output_fi
   
   variantcall_count <- 0
   
+  .t_variantcall_loop <- proc.time()
   for (i in 1:nrow(approved_variants)) {
     variant_row <- approved_variants[i, ]
     
@@ -485,6 +486,7 @@ process_variantcall_database <- function(variantcall_data, cID_lookup, output_fi
     log_info(logger, paste("Added approved variant rule for", chrom, ":", pos, gene_info, "in", disease_name, "with cID", gene_cID))
   }
   
+  log_info(logger, paste("⏱️ variantcall loop:", round((proc.time() - .t_variantcall_loop)["elapsed"], 2), "s"))
   log_info(logger, paste("Added", variantcall_count, "approved variant rules from variantCall database"))
   
   return(list(
@@ -833,7 +835,6 @@ generate_rules <- function(master_gene_list, variant_list, cutoff_list, config, 
   traced_writeLines("Disease_report\tRULE\tcID\tcCond\tcThresh", output_file)
   
   # Generate rules for each disease (following manual script cID assignment strategy)
-  cID <- 0  # Initialize to 0 like manual script
   total_rules <- 0
   
   # Initialize step-by-step tracing system
@@ -843,69 +844,200 @@ generate_rules <- function(master_gene_list, variant_list, cutoff_list, config, 
   log_step(trace, "Initialization", "Starting rules generation process", 0, 0, 
            paste("Processing", nrow(gene_list), "genes across", length(unique(gene_list$Disease)), "diseases"))
   
-  # OPTIMIZATION: Pre-split gene_list by disease once, instead of
-  # subsetting gene_list[gene_list$Disease == disease_name, ] on every iteration.
-  # split() builds all subsets in a single pass over the data.
-  # Preserve original disease order (unique preserves first-occurrence order).
-  disease_order <- unique(gene_list$Disease)
-  gene_lists_by_disease <- split(gene_list, gene_list$Disease)
+  # =====================================================================
+  # PHASE A: Pre-compute all constants that are invariant across genes
+  # =====================================================================
+  frequency_rule <- config$rules$frequency_rules[1]
+  frequency_rule <- gsub("\\{FORMAT_GQ_THRESHOLD\\}", config$settings$FORMAT_GQ_THRESHOLD, frequency_rule)
+  frequency_rule_special <- config$settings$FREQUENCY_RULE_SPECIAL
+  if (!is.null(frequency_rule_special)) {
+    frequency_rule_special <- gsub("\\{FORMAT_GQ_THRESHOLD\\}", config$settings$FORMAT_GQ_THRESHOLD, frequency_rule_special)
+  }
   
+  # Pre-compute exclusion zone rules for all genes that have terminal cutoffs
+  cutoff_genes <- rownames(cutoff_list)
+  exclusion_zone_lookup <- setNames(
+    paste0(" && POS ", cutoff_list[cutoff_genes, "Terminal.Cutoff.Missense"], " "),
+    cutoff_genes
+  )
+  
+  # Vectorized exclusion zone lookup function (replaces per-gene exclusion_rule_function)
+  get_exclusion_zones <- function(genes) {
+    result <- rep("", length(genes))
+    has_cutoff <- genes %in% cutoff_genes
+    if (any(has_cutoff)) {
+      result[has_cutoff] <- exclusion_zone_lookup[genes[has_cutoff]]
+    }
+    result
+  }
+  
+  # Pre-compute supplemental variant list gene lookup (avoid repeated gsub per gene)
+  variant_genes_clean <- gsub(" ", "", variant_list_data$Gene)
+  
+  # =====================================================================
+  # PHASE B: Pre-compute cID assignments for all genes
+  # =====================================================================
+  # Remove NA genes first (they get skipped in the loop)
+  valid_mask <- !is.na(gene_list$Gene)
+  
+  # Determine cID increment per gene: AR non-carrier non-Special genes consume 2 cIDs
+  needs_homozygous <- gene_list$Inheritance == "AR" & !gene_list$Carrier & gene_list$Variants.To.Find != "Special" & valid_mask
+  cid_increment <- ifelse(valid_mask, ifelse(needs_homozygous, 2, 1), 0)
+  cid_cumsum <- cumsum(cid_increment)
+  # cID for gene i = cid_cumsum[i] - (cid_increment[i] - 1)
+  # i.e. for 2-increment genes, the main cID is cumsum-1, homozygous cID is cumsum
+  gene_cIDs <- cid_cumsum - (cid_increment - 1)
+  
+  # Pre-compute inheritance values
+  cCond_all <- rep(">=", nrow(gene_list))
+  cThresh_all <- ifelse(gene_list$Inheritance == "AR" & !gene_list$Carrier, 2, 1)
+  
+  # Build cID_lookup for variantcall processing later
+  .t_cid_lookup <- proc.time()
+  cID_lookup <- list()
+  for (idx in which(valid_mask)) {
+    lookup_key <- paste(gene_list$Disease[idx], gene_list$Gene[idx], sep = "_")
+    cID_lookup[[lookup_key]] <- list(cID = gene_cIDs[idx], cCond = cCond_all[idx], cThresh = cThresh_all[idx])
+  }
+  log_info(logger, paste("⏱️ cID_lookup build:", round((proc.time() - .t_cid_lookup)["elapsed"], 2), "s"))
+  # Final cID value for variantcall processing
+  cID <- max(cid_cumsum)
+  
+  # =====================================================================
+  # PHASE C+D+E: Generate all rules vectorized, collect in memory
+  # =====================================================================
+  # Pre-allocate list to avoid O(n^2) vector growth from c(all_rules, ...)
+  rules_chunks <- vector("list", nrow(gene_list) * 2)  # generous pre-allocation
+  chunk_idx <- 0L
+  
+  # Preserve original disease order
+  disease_order <- unique(gene_list$Disease)
+  
+  .t_main_loop <- proc.time()
   for (disease_name in disease_order) {
-    gene_list_here <- gene_lists_by_disease[[disease_name]]
-    log_info(logger, paste("Processing disease:", disease_name, "with", nrow(gene_list_here), "genes"))
+    disease_mask <- gene_list$Disease == disease_name & valid_mask
+    disease_indices <- which(disease_mask)
     
-    # Log disease processing start
+    if (length(disease_indices) == 0) next
+    
+    log_info(logger, paste("Processing disease:", disease_name, "with", length(disease_indices), "genes"))
     log_step(trace, "Disease Processing", paste("Starting processing for disease:", disease_name), 0, 
-             details = paste("Disease has", nrow(gene_list_here), "genes to process"))
+             details = paste("Disease has", length(disease_indices), "genes to process"))
     
-    for (j in 1:nrow(gene_list_here)) {
-      gene_info <- gene_list_here[j, , drop = FALSE]
+    for (idx in disease_indices) {
+      gene <- gene_list$Gene[idx]
+      variants_to_find <- gene_list$Variants.To.Find[idx]
+      my_cID <- gene_cIDs[idx]
+      my_cCond <- cCond_all[idx]
+      my_cThresh <- cThresh_all[idx]
       
-      # Skip genes with NA values
-      if (is.na(gene_info[["Gene"]])) {
-        log_warning(logger, paste("Skipping gene with NA value in disease:", disease_name))
+      gene_rule <- paste0("SYMBOL == ", gene, " ")
+      inheritance_rule <- paste(my_cID, my_cCond, my_cThresh, sep = "\t")
+      
+      gene_rules <- character(0)
+      
+      if (variants_to_find == "PTV only") {
+        exclusion_zone_rule <- get_exclusion_zones(gene)
+        ptv_rules <- c(" && Consequence == frameshift_variant", " && Consequence == stop_gained")
+        gene_rules <- paste(disease_name, paste0(gene_rule, ptv_rules, exclusion_zone_rule, frequency_rule), inheritance_rule, sep = "\t")
+        
+      } else if (variants_to_find == "Clinvar P and LP") {
+        clinvar_rules <- config$rules$clinvar_rules
+        gene_rules <- paste(disease_name, paste0(gene_rule, clinvar_rules, frequency_rule), inheritance_rule, sep = "\t")
+        
+      } else if (variants_to_find == "See supplemental variant list") {
+        # Check if ClinVar benign should be excluded
+        if (gene %in% config$special_cases$clinvar_benign_genes) {
+          clinvar_benign_rule <- " && ClinVar_CLNSIG != Benign && ClinVar_CLNSIG != Likely_benign && ClinVar_CLNSIG != Benign/Likely_benign && ClinVar_CLNSIG != Conflicting_interpretations_of_pathogenicity && ClinVar_CLNSIG != Uncertain_significance"
+        } else {
+          clinvar_benign_rule <- ""
+        }
+        
+        # Use pre-computed clean gene names for lookup
+        gene_variant_rows <- which(variant_genes_clean == gene)
+        
+        if (length(gene_variant_rows) == 0) {
+          log_warning(logger, paste("Did not find gene in supplemental list for", gene, "- completely skipping this gene. Should report"))
+          next
+        }
+        
+        gene_variants <- variant_list_data[gene_variant_rows, ]
+        specific_variant_rules <- process_supplemental_variants(gene_variants, logger)
+        gene_rules <- paste(disease_name, paste0(gene_rule, specific_variant_rules, frequency_rule, clinvar_benign_rule), inheritance_rule, sep = "\t")
+        
+      } else if (tolower(variants_to_find) == "missense and nonsense") {
+        exclusion_zone_rule <- get_exclusion_zones(gene)
+        spliceai_gene_rule <- paste0("SpliceAI_pred_SYMBOL == ", gene)
+        
+        strings_1 <- paste(disease_name, paste0(gene_rule, config$rules$non_splice_pos_rules, exclusion_zone_rule, frequency_rule), inheritance_rule, sep = "\t")
+        strings_2 <- paste(disease_name, paste0(gene_rule, config$rules$non_splice_rules, frequency_rule), inheritance_rule, sep = "\t")
+        strings_3 <- paste(disease_name, paste0(spliceai_gene_rule, config$rules$spliceai_rules, frequency_rule), inheritance_rule, sep = "\t")
+        
+        # Apply position exclusions from configuration
+        position_exclusions <- config$special_cases$position_exclusions
+        if (!is.null(position_exclusions) && nrow(position_exclusions) > 0) {
+          gene_exclusions <- position_exclusions[position_exclusions$gene == gene, ]
+          if (nrow(gene_exclusions) > 0) {
+            for (ei in 1:nrow(gene_exclusions)) {
+              rule_pattern <- gene_exclusions[ei, "rule_pattern"]
+              exclusion_conditions <- gene_exclusions[ei, "exclusion_conditions"]
+              
+              if (grepl("SpliceAI", rule_pattern)) {
+                matching_rules <- grep(rule_pattern, strings_3, fixed = TRUE)
+                if (length(matching_rules) > 0) {
+                  strings_3[matching_rules] <- sub(paste0("format_GQ >= ", config$settings$FORMAT_GQ_THRESHOLD),
+                                                   paste0("format_GQ >= ", config$settings$FORMAT_GQ_THRESHOLD, " ", exclusion_conditions),
+                                                   strings_3[matching_rules])
+                }
+              } else {
+                matching_rules <- grep(rule_pattern, strings_2, fixed = TRUE)
+                if (length(matching_rules) > 0) {
+                  strings_2[matching_rules] <- sub(paste0("format_GQ >= ", config$settings$FORMAT_GQ_THRESHOLD),
+                                                   paste0("format_GQ >= ", config$settings$FORMAT_GQ_THRESHOLD, " ", exclusion_conditions),
+                                                   strings_2[matching_rules])
+                }
+              }
+            }
+          }
+        }
+        
+        gene_rules <- c(strings_1, strings_2, strings_3)
+        
+      } else if (variants_to_find == "Special") {
+        gene_rules <- generate_special_rules(gene_rule, disease_name, gene, cutoff_list, frequency_rule, my_cID, config)
+        
+      } else {
+        log_warning(logger, paste("Unsupported Variants-to-find logic for gene", gene, "disease", disease_name, ":", variants_to_find))
         next
       }
       
-      # Increment cID for each gene-disease pair (matching manual script)
-      cID <- cID + 1
-      
-      # Calculate inheritance values before generating rules (single calculation)
-      inheritance <- gene_info[["Inheritance"]]
-      cCond <- ">="
-      if (inheritance %in% c("AR") & !gene_info[["Carrier"]]) {
-        cThresh <- 2
-      } else {
-        cThresh <- 1
-      }
-      
-      # Create lookup key for this gene/disease combination
-      lookup_key <- paste(gene_info[["Disease"]], gene_info[["Gene"]], sep="_")
-      if (!exists("cID_lookup")) {
-        cID_lookup <- list()
-      }
-      cID_lookup[[lookup_key]] <- list(cID=cID, cCond=cCond, cThresh=cThresh)
-      
-      # Generate rules for this gene (passing inheritance values)
-      gene_rules <- generate_gene_rules(gene_info, cutoff_list, variant_list_data, config, cID, cCond, cThresh, logger)
-      
       if (length(gene_rules) > 0) {
-        traced_writeLines(gene_rules, output_file)
+        chunk_idx <- chunk_idx + 1L
+        rules_chunks[[chunk_idx]] <- gene_rules
         total_rules <- total_rules + length(gene_rules)
-        log_gene_processing(trace, gene_info[["Gene"]], disease_name, gene_info[["Variants.To.Find"]], length(gene_rules))
+        log_gene_processing(trace, gene, disease_name, variants_to_find, length(gene_rules))
         
-        # Add homozygous rules for AR/XLR non-carrier genes (matching manual script)
-        inheritance <- gene_info[["Inheritance"]]
-        if (inheritance %in% c("AR") & !gene_info[["Carrier"]] & gene_info[["Variants.To.Find"]] != "Special") {
-          original_cID <- cID  # Save the cID used in the original rules
-          cID <- cID + 1       # Increment for homozygous rules
-          homozygous_strings <- add_homozygous_rules(gene_rules, original_cID)  # Pass original cID to get cID+1 in homozygous rules
-          traced_writeLines(homozygous_strings, output_file)
+        # Add homozygous rules for AR non-carrier non-Special genes
+        if (needs_homozygous[idx]) {
+          homozygous_strings <- add_homozygous_rules(gene_rules, my_cID)
+          chunk_idx <- chunk_idx + 1L
+          rules_chunks[[chunk_idx]] <- homozygous_strings
           total_rules <- total_rules + length(homozygous_strings)
         }
       }
     }
   }
+  
+  log_info(logger, paste("⏱️ main gene loop:", round((proc.time() - .t_main_loop)["elapsed"], 2), "s"))
+  
+  # Flush any remaining buffered log entries
+  flush_gene_log(trace)
+  
+  # Flatten all rule chunks and write to file in one operation
+  .t_write <- proc.time()
+  all_rules <- unlist(rules_chunks[seq_len(chunk_idx)])
+  traced_writeLines(all_rules, output_file)
+  log_info(logger, paste("⏱️ flatten + write rules:", round((proc.time() - .t_write)["elapsed"], 2), "s"))
   
   # Process variantCall database for approved variants (replaces old variant changes system)
   if (!is.null(config$prepared_data) && !is.null(config$prepared_data$variantcall_database)) {
@@ -923,13 +1055,19 @@ generate_rules <- function(master_gene_list, variant_list, cutoff_list, config, 
   close(output_file)
   
   # Post-processing: Fix spacing issues in the output file
+  .t_fix_spacing <- proc.time()
   fix_rule_spacing(output_filename, logger)
+  log_info(logger, paste("⏱️ fix_rule_spacing:", round((proc.time() - .t_fix_spacing)["elapsed"], 2), "s"))
   
   # Generate JSON files
+  .t_json <- proc.time()
   json_data <- generate_gene_list_json(gene_list, config$output_dir, logger)
+  log_info(logger, paste("⏱️ generate_gene_list_json:", round((proc.time() - .t_json)["elapsed"], 2), "s"))
   
   # Quality control checks
+  .t_qc <- proc.time()
   qc_results <- perform_quality_control(gene_list, output_filename, logger)
+  log_info(logger, paste("⏱️ perform_quality_control:", round((proc.time() - .t_qc)["elapsed"], 2), "s"))
   
   log_info(logger, paste("Rule generation completed. Generated", total_rules, "rules"))
   log_info(logger, paste("Output file:", output_filename))
@@ -964,7 +1102,8 @@ init_step_trace <- function(output_dir, logger) {
     gene_counter = 0,
     disease_rules = list(),
     processing_steps = list(),
-    start_time = Sys.time()
+    start_time = Sys.time(),
+    buffered_tsv_lines = character(0)
   )
   
   # Write markdown header
@@ -1071,20 +1210,29 @@ log_gene_processing <- function(trace, gene, disease, variant_type, rules_genera
   trace$disease_rules[[disease]]$genes <- trace$disease_rules[[disease]]$genes + 1
   trace$disease_rules[[disease]]$rules <- trace$disease_rules[[disease]]$rules + rules_generated
   
-  details <- paste("Gene:", gene, "| Disease:", disease, "| Type:", variant_type, "| Rules:", rules_generated)
+  # Buffer trace entries in memory instead of writing per gene (major perf win)
+  trace$step_counter <- trace$step_counter + 1
+  trace$total_rules <- trace$total_rules + rules_generated
   
-  log_step(trace, 
-           "Gene Processing", 
-           paste("Processed gene", gene, "for", disease, "using", variant_type, "logic"),
-           rules_generated,
-           details = details)
-  
-  # Write detailed TSV entry for gene processing
-  timestamp_str <- format(Sys.time(), "%Y-%m-%d %H:%M:%S")
-  tsv_line <- paste(trace$step_counter, "Gene Processing", timestamp_str, gene, disease, variant_type,
-                    rules_generated, trace$total_rules, 
-                    gsub("\t", " ", paste("Processed gene", gene, "for", disease)), sep = "\t")
-  cat(tsv_line, "\n", file = trace$tsv_file, append = TRUE)
+  trace$buffered_tsv_lines <- c(trace$buffered_tsv_lines,
+    paste(trace$step_counter, "Gene Processing", "", gene, disease, variant_type,
+          rules_generated, trace$total_rules,
+          paste("Processed gene", gene, "for", disease), sep = "\t"))
+}
+
+#' Flush buffered gene processing log entries to disk
+#' @param trace Trace object
+flush_gene_log <- function(trace) {
+  if (length(trace$buffered_tsv_lines) > 0) {
+    cat(paste(trace$buffered_tsv_lines, collapse = "\n"), "\n",
+        file = trace$tsv_file, append = TRUE)
+    lines <- c(
+      paste("### Gene Processing (batched,", length(trace$buffered_tsv_lines), "genes)"),
+      "", paste("**Total Rules:**", trace$total_rules),
+      paste("**Time:**", format(Sys.time(), "%H:%M:%S")), "", "---", "")
+    writeLines(lines, trace$file, sep = "\n")
+    trace$buffered_tsv_lines <- character(0)
+  }
 }
 
 #' Finalize trace report
@@ -1156,16 +1304,22 @@ perform_quality_control <- function(gene_list, output_filename, logger) {
   rules_data <- read.csv(output_filename, sep = "\t", stringsAsFactors = FALSE)
   
   # Check for genes with no rules
-  no_rules_genes <- character()
-  for (gene in unique(gene_list$Gene)) {
-    if (is.na(gene)) next
-    if (length(grep(gene, rules_data$RULE)) == 0) {
-      no_rules_genes <- c(no_rules_genes, gene)
-    }
-  }
+  # Extract gene names from rules in one vectorized pass instead of
+  # running grep(gene, rules_data$RULE) per gene (~1800 x 91K regex scans).
+  # All rules start with "SYMBOL == GENE ..." or "SpliceAI_pred_SYMBOL == GENE ..."
+  rule_strings <- rules_data$RULE
+  rule_genes <- sub("^SYMBOL == (\\S+) .*", "\\1", rule_strings)
+  spliceai_mask <- startsWith(rule_strings, "SpliceAI_pred_SYMBOL")
+  rule_genes[spliceai_mask] <- sub("^SpliceAI_pred_SYMBOL == (\\S+).*", "\\1",
+                                    rule_strings[spliceai_mask])
+  genes_with_rules <- unique(rule_genes)
+  
+  input_genes <- unique(gene_list$Gene)
+  input_genes <- input_genes[!is.na(input_genes)]
+  no_rules_genes <- sort(setdiff(input_genes, genes_with_rules))
   
   if (length(no_rules_genes) > 0) {
-    log_warning(logger, paste("These genes had no rules associated with them:", paste(sort(no_rules_genes), collapse = ", ")))
+    log_warning(logger, paste("These genes had no rules associated with them:", paste(no_rules_genes, collapse = ", ")))
   }
   
   # Check for problematic disease names
