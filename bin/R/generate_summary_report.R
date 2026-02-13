@@ -43,7 +43,10 @@ format_percentage <- function(x) {
 #' @return List containing input statistics
 generate_input_stats_from_prepared_data <- function(prepared_data) {
   tryCatch({
-    gene_data <- prepared_data$gene_list
+    # Use unfiltered gene list when available so Previous and Current
+    # show the same raw input counts. Filtering details are shown
+    # separately in the Entry Filtering Summary section.
+    gene_data <- prepared_data$gene_list_unfiltered %||% prepared_data$gene_list
     variant_data <- prepared_data$variant_list
     
     # Analyze gene list (data already has mapped columns)
@@ -872,25 +875,27 @@ generate_report_content <- function(version_dir, rules_analysis, previous_rules_
       na_comparison <- analyze_na_entries_comparison(input_stats$na_stats, previous_stats$na_stats)
       
       # Create summary table
+      prev_total <- previous_stats$na_stats$total_incomplete_entries
+      curr_total <- input_stats$na_stats$total_incomplete_entries
       na_summary_df <- data.frame(
-        "Category" = c("Deleted", "Remaining", "New", "**Total Current**"),
+        "Category" = c("Deleted", "Remaining", "New", "**Total**"),
         "Previous" = c(
-          format_number(previous_stats$na_stats$total_incomplete_entries),
+          format_number(na_comparison$summary$deleted_count),
           format_number(na_comparison$summary$remaining_count),
-          "0",
-          format_number(previous_stats$na_stats$total_incomplete_entries)
+          format_number(na_comparison$summary$new_count),
+          format_number(prev_total)
         ),
         "Current" = c(
-          "0", 
+          format_number(na_comparison$summary$deleted_count),
           format_number(na_comparison$summary$remaining_count),
           format_number(na_comparison$summary$new_count),
-          format_number(input_stats$na_stats$total_incomplete_entries)
+          format_number(curr_total)
         ),
-            "Count" = c(
-          format_number(na_comparison$summary$deleted_count),
-          format_number(na_comparison$summary$remaining_count), 
-          format_number(na_comparison$summary$new_count),
-          format_number(input_stats$na_stats$total_incomplete_entries)
+        "Change" = c(
+          if (na_comparison$summary$deleted_count > 0) paste0("-", na_comparison$summary$deleted_count) else "0",
+          "0",
+          if (na_comparison$summary$new_count > 0) paste0("+", na_comparison$summary$new_count) else "0",
+          as.character(curr_total - prev_total)
         ),
         "Description" = c(
           "Incomplete entries that were resolved (no longer missing critical data)",
