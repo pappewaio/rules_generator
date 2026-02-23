@@ -616,6 +616,34 @@ generate_gene_list_json <- function(gene_list, output_dir, logger) {
   ))
 }
 
+#' Generate disease-gene metadata TSV
+#' @param gene_list Processed gene list data frame
+#' @param output_dir Output directory (version directory)
+#' @param logger Logger instance
+#' @return Invisible path to the written file
+generate_disease_gene_metadata_tsv <- function(gene_list, output_dir, logger) {
+  log_info(logger, "Generating disease-gene metadata TSV file")
+
+  valid <- !is.na(gene_list$Gene) & !is.na(gene_list$Disease)
+  metadata_df <- data.frame(
+    disease     = gene_list$Disease[valid],
+    gene        = gene_list$Gene[valid],
+    inheritance = gene_list$Inheritance[valid],
+    carrier     = gene_list$Carrier[valid],
+    stringsAsFactors = FALSE
+  )
+
+  date_prefix <- format(Sys.Date(), "%Y-%m-%d")
+  output_path <- file.path(output_dir, "outputs",
+                           paste0(date_prefix, "_disease_gene_metadata.tsv"))
+  traced_write_table(metadata_df, output_path,
+                     sep = "\t", row.names = FALSE, quote = FALSE)
+
+  log_info(logger, paste("Generated disease-gene metadata TSV with",
+                         nrow(metadata_df), "entries"))
+  invisible(output_path)
+}
+
 #' Main rule generation function  
 #' @param master_gene_list Pre-loaded gene list data frame (not file path)
 #' @param variant_list Pre-loaded variant list data frame (not file path)
@@ -890,6 +918,11 @@ generate_rules <- function(master_gene_list, variant_list, cutoff_list, config, 
   json_data <- generate_gene_list_json(gene_list, config$output_dir, logger)
   log_info(logger, paste("⏱️ generate_gene_list_json:", round((proc.time() - .t_json)["elapsed"], 2), "s"))
   
+  # Generate disease-gene metadata TSV
+  .t_metadata <- proc.time()
+  metadata_path <- generate_disease_gene_metadata_tsv(gene_list, config$output_dir, logger)
+  log_info(logger, paste("⏱️ generate_disease_gene_metadata_tsv:", round((proc.time() - .t_metadata)["elapsed"], 2), "s"))
+  
   # Quality control checks
   .t_qc <- proc.time()
   qc_results <- perform_quality_control(gene_list, output_filename, logger)
@@ -904,6 +937,7 @@ generate_rules <- function(master_gene_list, variant_list, cutoff_list, config, 
     output_file = output_filename,
     total_rules = total_rules,
     gene_list_json = json_data,
+    disease_gene_metadata_path = metadata_path,
     qc_results = qc_results
   ))
 }
