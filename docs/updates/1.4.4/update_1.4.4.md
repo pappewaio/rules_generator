@@ -24,13 +24,13 @@
 ### Master Gene List
 - Deleted 1 gene-disease combination:
   - `KRT82` — KRT82-associated_alopecia_areata
-- Added 6 new entries (5 genes), but all have Science Name = NA so they are filtered out and do not yet generate rules:
-  - `IFT140` — IFT140-related autosomal dominant polycystic kidney disease (AD, ClinVar P and LP)
-  - `SLC7A9` — Autosomal dominant cystinuria, complex (AD, ClinVar P and LP)
-  - `REN` — REN-related autosomal recessive renal tubular dysgenesis (AR, Missense and nonsense)
-  - `AQP2` — AQP2-related autosomal recessive nephrogenic diabetes insipidus (AR, Missense and nonsense)
-  - `SNORD118` — Leukoencephalopathy, brain calcifications, and cysts (AR, Missense and nonsense)
-  - `SLC4A1` — Distal renal tubular acidosis 4 with hemolytic anemia (AR, Missense and nonsense)
+- Added 6 new gene-disease entries (5 existing genes + 1 new gene):
+  - `IFT140` — ift140_related_autosomal_dominant_polycystic_kidney_disease (AD, ClinVar P and LP)
+  - `SLC7A9` — autosomal_dominant_cystinuria_complex (AD, ClinVar P and LP)
+  - `REN` — ren_related_autosomal_recessive_renal_tubular_dysgenesis (AR, Missense and nonsense)
+  - `AQP2` — aqp2_related_autosomal_recessive_nephrogenic_diabetes_insipidus (AR, Missense and nonsense)
+  - `SNORD118` — leukoencephalopathy_brain_calcifications_and_cysts (AR, Missense and nonsense)
+  - `SLC4A1` — distal_renal_tubular_acidosis_4_with_hemolytic_anemia (AR, Missense and nonsense)
 
 ### VariantCall Database
 - Approved variants: 4,854 → 4,995 (+141)
@@ -38,8 +38,9 @@
 - Unique diseases (approved): 1,244 → 1,258 (+14)
 
 ### Rules
-- Total rules: 96,117 → 96,212 (+95)
-- Total diseases: 2,182 → 2,181 (-1)
+- Total rules: 96,117 → 96,400 (+283)
+- Total diseases: 2,182 → 2,187 (+5)
+- Total genes: 1,821 → 1,822 (+1)
 
 ---
 
@@ -49,7 +50,7 @@
 - Same master gene list, variant list, and variantCall database as 50B
 
 ### Devel rules added
-- All 96,205 production rules duplicated with `devel_` prefix and lower QC:
+- All 96,393 production rules duplicated with `devel_` prefix and lower QC:
   - `QUAL >= 22.4` → `QUAL >= 13`
   - `format_DP >= 8` → `format_DP >= 5`
   - `format_GQ >= 16` → `format_GQ >= 13`
@@ -58,16 +59,17 @@
   - 184 rules generated (Missense and nonsense strategy, cThresh=1)
 
 ### Rules
-- Production rules: 96,212 (unchanged from 50B)
-- Devel duplicate rules: 96,205
+- Production rules: 96,400 (unchanged from 50B)
+- Devel duplicate rules: 96,393
 - Devel-only gene rules: 184
-- Total rules: 192,601
+- Total rules: 192,977
 
 ---
 
 ## Cumulative 48B → 50C
-- Production rules: 95,351 → 96,212 (+861)
-- Total rules (incl. devel): 192,601
-- Total diseases: 2,184 → 2,181 (-3, production only)
+- Production rules: 95,351 → 96,400 (+1,049)
+- Total rules (incl. devel): 192,977
+- Total diseases: 2,184 → 2,187 (+3, production only)
+- Total genes: 1,821 → 1,822 (+1)
 - Approved variants: 4,084 → 4,995 (+911)
-- Gene list entries: 2,461 → 2,464 (+3 net, but 6 new ones filtered due to missing Science Name)
+- Gene list entries: 2,461 → 2,464 (+3 net)
