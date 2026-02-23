@@ -388,35 +388,168 @@ validate_input_files <- function(master_gene_list, variant_list, variantcall_dat
   return(TRUE)
 }
 
-#' Generate deployment script (simplified)
+#' Read a KEY=VALUE config file keeping all values as strings
+#' @param config_file Path to config file
+#' @return Named list of string values
+read_deploy_config <- function(config_file) {
+  lines <- readLines(config_file)
+  lines <- lines[!grepl("^\\s*#", lines) & nchar(trimws(lines)) > 0]
+  config <- list()
+  for (line in lines) {
+    if (grepl("=", line)) {
+      key <- trimws(sub("=.*", "", line))
+      value <- trimws(sub("^[^=]+=", "", line))
+      config[[key]] <- value
+    }
+  }
+  return(config)
+}
+
+#' Generate deployment script from deployment.conf
 #' @param version_dir Version directory path
 #' @param rules_version Rules version number
 generate_deployment_script <- function(version_dir, rules_version) {
   deployment_script_path <- file.path(version_dir, "deployment", "deploy_to_s3.sh")
+
+  deploy_config_path <- file.path(version_dir, "inputs", "config", "deployment.conf")
+
+  if (!file.exists(deploy_config_path)) {
+    deployment_script_content <- sprintf('#!/bin/bash
+echo "Error: No deployment.conf was found in the input config for version %s."
+echo ""
+echo "To fix this, either:"
+echo "  1. Add a deployment.conf to your input config directory and rerun rules generation"
+echo "  2. Replace this script manually with a custom deploy script"
+echo ""
+echo "See docs/plans/config-driven-deploy-script.md for the deployment.conf format."
+exit 1
+', rules_version)
+    writeLines(deployment_script_content, deployment_script_path)
+    Sys.chmod(deployment_script_path, mode = "755")
+    return(deployment_script_path)
+  }
+
+  dc <- read_deploy_config(deploy_config_path)
+  deploy_env <- dc$DEPLOY_ENV %||% "production"
+  s3_bucket <- dc$S3_BUCKET %||% ""
+  s3_version <- dc$S3_VERSION %||% ""
+  deploy_rules_name <- dc$DEPLOY_RULES_NAME %||% "{DATE}_rules_file.tsv"
+
   deployment_script_content <- sprintf('#!/bin/bash
 
 # S3 Deployment Script for Rules Version %s
-# Generated automatically by Rules Generation Framework
+# Generated automatically from deployment.conf
+
+set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FRAMEWORK_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-S3_SCRIPT="$FRAMEWORK_DIR/deployment/upload_to_s3.sh"
+OUTPUT_DIR="$(dirname "$SCRIPT_DIR")"
 
-echo "Deploying Rules Version %s to S3..."
-echo "Output Directory: $(dirname "$SCRIPT_DIR")"
+# --- Settings from deployment.conf ---
+DEPLOY_ENV="%s"
+S3_BUCKET="%s"
+S3_VERSION="%s"
+DEPLOY_RULES_NAME_PATTERN="%s"
 
-if [[ ! -f "$S3_SCRIPT" ]]; then
-    echo "Error: S3 deployment script not found: $S3_SCRIPT"
+# --- Discover output files ---
+RULES_FILE=$(ls "$OUTPUT_DIR"/outputs/*_rules_file_from_carrier_list_nr_*.tsv 2>/dev/null | head -1)
+JSON_FILE="$OUTPUT_DIR/outputs/list_of_analyzed_genes_science_pipeline_names.json"
+METADATA_FILE=$(ls "$OUTPUT_DIR"/outputs/*_disease_gene_metadata.tsv 2>/dev/null | head -1)
+
+if [[ -z "$RULES_FILE" || ! -f "$RULES_FILE" ]]; then
+    echo "Error: No rules file found in $OUTPUT_DIR/outputs/"
     exit 1
 fi
 
-# Pass all arguments to the main S3 script, but set the output directory and rules version
-"$S3_SCRIPT" --output-dir "$(dirname "$SCRIPT_DIR")" --rules-version %s "$@"
-', rules_version, rules_version, rules_version)
-  
+# --- Resolve deploy rules name ---
+DATE_PREFIX=$(basename "$RULES_FILE" | grep -oP "^\\d{4}-\\d{2}-\\d{2}")
+DEPLOY_RULES_NAME=$(echo "$DEPLOY_RULES_NAME_PATTERN" | sed "s/{DATE}/$DATE_PREFIX/g" | sed "s/{S3_VERSION}/$S3_VERSION/g")
+
+echo "=== S3 Deployment for Rules Version %s ==="
+echo "Environment: $DEPLOY_ENV"
+echo "S3 bucket:   $S3_BUCKET"
+echo "S3 version:  $S3_VERSION"
+echo ""
+
+# --- Verify source files ---
+echo "Verifying source files..."
+for file in "$RULES_FILE" "$JSON_FILE"; do
+    if [[ ! -f "$file" ]]; then
+        echo "Error: Required file not found: $file"
+        exit 1
+    fi
+    echo "  ✅ $(basename "$file") - $(du -h "$file" | cut -f1)"
+done
+if [[ -n "$METADATA_FILE" && -f "$METADATA_FILE" ]]; then
+    echo "  ✅ $(basename "$METADATA_FILE") - $(du -h "$METADATA_FILE" | cut -f1)"
+fi
+
+echo ""
+echo "Rules file details:"
+echo "  Size:  $(du -h "$RULES_FILE" | cut -f1)"
+echo "  Lines: $(wc -l < "$RULES_FILE")"
+echo ""
+
+# --- Rename rules file for deployment ---
+TEMP_RULES_FILE="$(dirname "$RULES_FILE")/$DEPLOY_RULES_NAME"
+cp "$RULES_FILE" "$TEMP_RULES_FILE"
+echo "Renamed: $(basename "$RULES_FILE") -> $DEPLOY_RULES_NAME"
+echo ""
+
+# --- Upload to S3 ---
+echo "Uploading to S3..."
+if [[ "$DEPLOY_ENV" == "production" ]]; then
+    S3_BASE="$S3_BUCKET/$S3_VERSION"
+
+    echo "  Deploying rules file..."
+    aws s3 cp "$TEMP_RULES_FILE" "$S3_BASE/rules_main/"
+
+    echo "  Deploying gene list JSON..."
+    aws s3 cp "$JSON_FILE" "$S3_BASE/"
+
+    if [[ -n "$METADATA_FILE" && -f "$METADATA_FILE" ]]; then
+        echo "  Deploying disease-gene metadata..."
+        aws s3 cp "$METADATA_FILE" "$S3_BASE/disease_gene_metadata_main/"
+    fi
+else
+    echo "  Deploying rules file..."
+    aws s3 cp "$TEMP_RULES_FILE" "$S3_BUCKET/"
+
+    echo "  Deploying gene list JSON..."
+    aws s3 cp "$JSON_FILE" "$S3_BUCKET/"
+
+    if [[ -n "$METADATA_FILE" && -f "$METADATA_FILE" ]]; then
+        echo "  Deploying disease-gene metadata..."
+        aws s3 cp "$METADATA_FILE" "$S3_BUCKET/"
+    fi
+fi
+
+# --- Cleanup ---
+rm "$TEMP_RULES_FILE"
+
+# --- Summary ---
+echo ""
+echo "✅ Deployment completed!"
+echo ""
+echo "Files deployed:"
+if [[ "$DEPLOY_ENV" == "production" ]]; then
+    echo "  📋 Rules:    $S3_BASE/rules_main/$DEPLOY_RULES_NAME"
+    echo "  📊 JSON:     $S3_BASE/$(basename "$JSON_FILE")"
+    if [[ -n "$METADATA_FILE" && -f "$METADATA_FILE" ]]; then
+        echo "  🧬 Metadata: $S3_BASE/disease_gene_metadata_main/$(basename "$METADATA_FILE")"
+    fi
+else
+    echo "  📋 Rules:    $S3_BUCKET/$DEPLOY_RULES_NAME"
+    echo "  📊 JSON:     $S3_BUCKET/$(basename "$JSON_FILE")"
+    if [[ -n "$METADATA_FILE" && -f "$METADATA_FILE" ]]; then
+        echo "  🧬 Metadata: $S3_BUCKET/$(basename "$METADATA_FILE")"
+    fi
+fi
+', rules_version, deploy_env, s3_bucket, s3_version, deploy_rules_name, rules_version)
+
   writeLines(deployment_script_content, deployment_script_path)
   Sys.chmod(deployment_script_path, mode = "755")
-  
+
   return(deployment_script_path)
 }
 

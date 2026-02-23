@@ -43,7 +43,10 @@ format_percentage <- function(x) {
 #' @return List containing input statistics
 generate_input_stats_from_prepared_data <- function(prepared_data) {
   tryCatch({
-    gene_data <- prepared_data$gene_list
+    # Use unfiltered gene list when available so Previous and Current
+    # show the same raw input counts. Filtering details are shown
+    # separately in the Entry Filtering Summary section.
+    gene_data <- prepared_data$gene_list_unfiltered %||% prepared_data$gene_list
     variant_data <- prepared_data$variant_list
     
     # Analyze gene list (data already has mapped columns)
@@ -431,6 +434,7 @@ generate_report_content <- function(version_dir, rules_analysis, previous_rules_
   report <- c(report, "  - Summary Overview")
   report <- c(report, "  - Rule Types Analysis")
   report <- c(report, "  - Inheritance Patterns")
+  report <- c(report, "  - Disease-Gene Metadata")
   report <- c(report, "")
   
   # Part 3 (Rule Change Analysis) removed - not production ready
@@ -438,6 +442,7 @@ generate_report_content <- function(version_dir, rules_analysis, previous_rules_
   report <- c(report, "- **[Part 3: Output Files Summary](#part-3-output-files-summary)**")
   report <- c(report, "  - Rules File")
   report <- c(report, "  - Gene List (Science Pipeline)")
+  report <- c(report, "  - Disease-Gene Metadata")
   report <- c(report, "  - Analysis Files")
   report <- c(report, "  - Configuration & Metadata")
   report <- c(report, "  - Logs & Deployment")
@@ -872,25 +877,27 @@ generate_report_content <- function(version_dir, rules_analysis, previous_rules_
       na_comparison <- analyze_na_entries_comparison(input_stats$na_stats, previous_stats$na_stats)
       
       # Create summary table
+      prev_total <- previous_stats$na_stats$total_incomplete_entries
+      curr_total <- input_stats$na_stats$total_incomplete_entries
       na_summary_df <- data.frame(
-        "Category" = c("Deleted", "Remaining", "New", "**Total Current**"),
+        "Category" = c("Deleted", "Remaining", "New", "**Total**"),
         "Previous" = c(
-          format_number(previous_stats$na_stats$total_incomplete_entries),
+          format_number(na_comparison$summary$deleted_count),
           format_number(na_comparison$summary$remaining_count),
-          "0",
-          format_number(previous_stats$na_stats$total_incomplete_entries)
+          format_number(na_comparison$summary$new_count),
+          format_number(prev_total)
         ),
         "Current" = c(
-          "0", 
+          format_number(na_comparison$summary$deleted_count),
           format_number(na_comparison$summary$remaining_count),
           format_number(na_comparison$summary$new_count),
-          format_number(input_stats$na_stats$total_incomplete_entries)
+          format_number(curr_total)
         ),
-            "Count" = c(
-          format_number(na_comparison$summary$deleted_count),
-          format_number(na_comparison$summary$remaining_count), 
-          format_number(na_comparison$summary$new_count),
-          format_number(input_stats$na_stats$total_incomplete_entries)
+        "Change" = c(
+          if (na_comparison$summary$deleted_count > 0) paste0("-", na_comparison$summary$deleted_count) else "0",
+          "0",
+          if (na_comparison$summary$new_count > 0) paste0("+", na_comparison$summary$new_count) else "0",
+          as.character(curr_total - prev_total)
         ),
         "Description" = c(
           "Incomplete entries that were resolved (no longer missing critical data)",
@@ -1737,6 +1744,72 @@ generate_report_content <- function(version_dir, rules_analysis, previous_rules_
     
   }
 
+  # Disease-Gene Metadata Summary
+  metadata_file <- list.files(file.path(version_dir, "outputs"),
+                              pattern = ".*_disease_gene_metadata\\.tsv$",
+                              full.names = TRUE)
+  if (length(metadata_file) > 0) {
+    metadata <- read.csv(metadata_file[1], sep = "\t", stringsAsFactors = FALSE)
+
+    prev_metadata <- NULL
+    if (!is.null(compare_with)) {
+      current_dir_name <- basename(version_dir)
+      if (grepl("^step_", current_dir_name)) {
+        output_root_meta <- dirname(dirname(version_dir))
+      } else {
+        output_root_meta <- dirname(version_dir)
+      }
+      prev_version_dir_meta <- find_previous_version_path(output_root_meta, version_dir, compare_with)
+      if (!is.null(prev_version_dir_meta) && dir.exists(prev_version_dir_meta)) {
+        prev_metadata_file <- list.files(file.path(prev_version_dir_meta, "outputs"),
+                                         pattern = ".*_disease_gene_metadata\\.tsv$",
+                                         full.names = TRUE)
+        if (length(prev_metadata_file) > 0) {
+          prev_metadata <- read.csv(prev_metadata_file[1], sep = "\t", stringsAsFactors = FALSE)
+        }
+      }
+    }
+
+    cur_inh <- table(metadata$inheritance)
+    cur_carrier <- sum(metadata$carrier == TRUE | metadata$carrier == "TRUE")
+
+    all_patterns <- sort(unique(c(names(cur_inh),
+                                  if (!is.null(prev_metadata)) names(table(prev_metadata$inheritance)))))
+    metrics <- c("Total entries", all_patterns, "Carrier entries")
+
+    cur_vals <- c(nrow(metadata),
+                  sapply(all_patterns, function(p) as.integer(ifelse(p %in% names(cur_inh), cur_inh[p], 0))),
+                  cur_carrier)
+
+    if (!is.null(prev_metadata)) {
+      prev_inh <- table(prev_metadata$inheritance)
+      prev_carrier <- sum(prev_metadata$carrier == TRUE | prev_metadata$carrier == "TRUE")
+      prev_vals <- c(nrow(prev_metadata),
+                     sapply(all_patterns, function(p) as.integer(ifelse(p %in% names(prev_inh), prev_inh[p], 0))),
+                     prev_carrier)
+      changes <- cur_vals - prev_vals
+    } else {
+      prev_vals <- rep(NA, length(metrics))
+      changes <- rep(NA, length(metrics))
+    }
+
+    meta_summary_df <- data.frame(
+      Metric = metrics,
+      Previous = prev_vals,
+      Current = cur_vals,
+      Change = changes,
+      stringsAsFactors = FALSE
+    )
+
+    report <- c(report, "## Disease-Gene Metadata")
+    report <- c(report, "*Summary of disease-gene metadata file (inheritance and carrier status per gene-disease pair)*")
+    report <- c(report, "")
+    report <- c(report, kable(meta_summary_df, format = "markdown", align = c("l", "r", "r", "r")))
+    report <- c(report, "")
+    report <- c(report, paste0("**File:** `outputs/", basename(metadata_file[1]), "`"))
+    report <- c(report, "")
+  }
+
   # MAIN PART 3: OUTPUT FILES SUMMARY
   report <- c(report, "# Part 3: Output Files Summary")
   report <- c(report, "")
@@ -1820,6 +1893,17 @@ generate_report_content <- function(version_dir, rules_analysis, previous_rules_
     )
   }
 
+  # Disease-gene metadata TSV
+  metadata_tsv_files <- list.files(file.path(version_dir, "outputs"),
+                                   pattern = ".*_disease_gene_metadata\\.tsv$",
+                                   full.names = FALSE)
+  if (length(metadata_tsv_files) > 0) {
+    output_files[["Disease-Gene Metadata"]] <- list(
+      path = paste0("outputs/", metadata_tsv_files[1]),
+      description = "Disease-gene metadata (inheritance, carrier status)"
+    )
+  }
+
   # Analysis files
   if (!is.null(input_comparison)) {
     output_files[["Input Comparison"]] <- list(
@@ -1869,6 +1953,7 @@ generate_report_content <- function(version_dir, rules_analysis, previous_rules_
     switch(name,
       "Rules File" = "Rules File",
       "list_of_analyzed_genes_science_pipeline_names.json" = "Gene List (Pipeline)",
+      "Disease-Gene Metadata" = "Disease-Gene Metadata",
       "Input Comparison" = "Input Comparison",
       "Predictions" = "Predictions",
       "Validation" = "Validation", 

@@ -204,6 +204,10 @@ main <- function() {
     log_info(logger, "Filtering incomplete entries with missing essential information...")
     source(file.path(script_dir, "rule_generator.R"))  # For filter_incomplete_entries
     
+    # Keep unfiltered gene list for summary report input comparison
+    # (so Previous and Current both show raw input counts, apples-to-apples)
+    prepared_data$gene_list_unfiltered <- prepared_data$gene_list
+    
     filtering_result <- filter_incomplete_entries(
       gene_list = prepared_data$gene_list,
       output_dir = version_dir,
@@ -280,11 +284,15 @@ main <- function() {
             )
             log_info(logger, "✅ Previous version data loaded successfully using centralized function")
             
+            # Keep unfiltered gene list for summary report input comparison
+            previous_prepared_data$gene_list_unfiltered <- previous_prepared_data$gene_list
+            
             # Apply filtering to previous data as well
+            # Write to current version dir (previous dir may be read-only)
             log_info(logger, "Filtering previous version incomplete entries...")
             previous_filtering_result <- filter_incomplete_entries(
               gene_list = previous_prepared_data$gene_list,
-              output_dir = previous_version_dir,  # Save to previous version directory
+              output_dir = version_dir,
               logger = logger
             )
             
