@@ -93,6 +93,7 @@ Optional Options:
                              (default: intelligent previous version detection)
   --version-comment "TEXT"    User comment describing this version's changes
   --s3-version VERSION       Deploy to S3 with this version (e.g., 1.2.22)
+  --devel-rules             Add devel_ prefixed rules with lower QC thresholds
   --overwrite               Overwrite existing version without prompting
   --check                   Check prerequisites and exit
   --skip-checker            Skip rules checker validation (faster for development)
@@ -154,6 +155,7 @@ RULES_VERSION_NUM=""
 COMPARE_WITH_VERSION_NUM=""
 VERSION_COMMENT=""
 OVERWRITE=false
+DEVEL_RULES=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -232,6 +234,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --skip-checker)
             R_ARGS+=("--skip-checker")
+            shift
+            ;;
+        --devel-rules)
+            DEVEL_RULES=true
             shift
             ;;
         --help|-h)
@@ -472,6 +478,60 @@ exit_code=$?
 
 if [ $exit_code -eq 0 ]; then
     print_success "Rules generation completed successfully!"
+    
+    # Devel rules post-processing if requested
+    if $DEVEL_RULES; then
+        print_status "Adding devel_ rules with lower QC thresholds..."
+        
+        DEVEL_SCRIPT="$FRAMEWORK_DIR/bin/generate_devel_rules.py"
+        if [[ ! -f "$DEVEL_SCRIPT" ]]; then
+            print_error "Devel rules script not found: $DEVEL_SCRIPT"
+            exit 1
+        fi
+        
+        # Find the rules file in the output directory
+        RULES_FILE=$(find "$TARGET_DIR/outputs" -name "*_rules_file_from_carrier_list_nr_*.tsv" -type f 2>/dev/null | head -1)
+        if [[ -z "$RULES_FILE" ]]; then
+            print_error "Could not find rules file in $TARGET_DIR/outputs/"
+            exit 1
+        fi
+        
+        # Find devel config in the input config directory
+        DEVEL_CONFIG_DIR="$TARGET_DIR/inputs/config/devel"
+        if [[ ! -d "$DEVEL_CONFIG_DIR" ]]; then
+            print_error "Devel config directory not found: $DEVEL_CONFIG_DIR"
+            print_error "Expected config/devel/ in the step input folder with devel_settings.conf and devel_only_genes.tsv"
+            exit 1
+        fi
+        
+        DEVEL_SETTINGS="$DEVEL_CONFIG_DIR/devel_settings.conf"
+        DEVEL_GENES="$DEVEL_CONFIG_DIR/devel_only_genes.tsv"
+        RULES_TEMPLATES="$TARGET_DIR/inputs/config/rules"
+        
+        if [[ ! -f "$DEVEL_SETTINGS" ]]; then
+            print_error "Devel settings not found: $DEVEL_SETTINGS"
+            exit 1
+        fi
+        if [[ ! -f "$DEVEL_GENES" ]]; then
+            print_error "Devel genes file not found: $DEVEL_GENES"
+            exit 1
+        fi
+        
+        python3 "$DEVEL_SCRIPT" \
+            --rules-file "$RULES_FILE" \
+            --devel-config "$DEVEL_SETTINGS" \
+            --devel-genes "$DEVEL_GENES" \
+            --rules-templates-dir "$RULES_TEMPLATES" \
+            --output-file "$RULES_FILE"
+        
+        devel_exit_code=$?
+        if [ $devel_exit_code -eq 0 ]; then
+            print_success "Devel rules added successfully!"
+        else
+            print_error "Devel rules generation failed with exit code: $devel_exit_code"
+            exit $devel_exit_code
+        fi
+    fi
     
     # S3 deployment if requested
     if [[ -n "$S3_VERSION" ]]; then
