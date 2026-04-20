@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """
-Post-processing script to add devel_ prefixed rules with lower QC thresholds.
+Post-processing script to add devel_ prefixed rules with lower QC thresholds,
+and optionally PM1 hotspot region rules.
 
 Takes a finished rules TSV file and produces a new file containing:
 1. All original production rules (unchanged)
 2. devel_ prefixed duplicates with lower QC thresholds
 3. devel_ prefixed rules for devel-only genes
+4. PM1 hotspot region rules (if --pm1-regions is provided)
+5. devel_ duplicates of PM1 rules
 
 Usage:
     python3 generate_devel_rules.py \
@@ -13,7 +16,8 @@ Usage:
         --devel-config <path_to_devel_settings.conf> \
         --devel-genes <path_to_devel_only_genes.tsv> \
         --rules-templates-dir <path_to_config/rules/> \
-        --output-file <path_to_output.tsv>
+        --output-file <path_to_output.tsv> \
+        [--pm1-regions <path_to_acadvl_pm1_regions.tsv>]
 """
 
 import argparse
@@ -83,6 +87,81 @@ def substitute_qc(rule_text, prod_qual, prod_dp, prod_gq, devel_qual, devel_dp, 
     return result
 
 
+def load_pm1_regions(pm1_path):
+    """Load PM1 hotspot regions from TSV config file."""
+    regions = []
+    with open(pm1_path, newline='') as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            parts = line.split('\t')
+            if parts[0] == 'Region_Name':
+                continue
+            regions.append({
+                'name': parts[0],
+                'start': int(parts[1]),
+                'end': int(parts[2]),
+                'description': parts[3] if len(parts) > 3 else '',
+            })
+    return regions
+
+
+def parse_pm1_header(pm1_path):
+    """Extract gene, disease, consequences, MAF field/threshold, and cID from header comments."""
+    config = {
+        'disease': 'Very_long-chain_acyl-CoA_dehydrogenase_deficiency_VLCAD',
+        'gene': 'ACADVL',
+        'consequences': ['missense_variant', 'inframe_deletion', 'inframe_insertion'],
+        'maf_field': 'MAX_AF',
+        'maf_threshold': '0.001',
+        'cid': 9999,
+    }
+    with open(pm1_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line.startswith('#'):
+                continue
+            if 'Disease:' in line:
+                config['disease'] = line.split('Disease:')[1].strip()
+            elif 'Gene:' in line:
+                config['gene'] = line.split('Gene:')[1].strip()
+            elif 'Consequences:' in line:
+                config['consequences'] = [c.strip() for c in line.split('Consequences:')[1].split(',')]
+            elif 'MAX_AF' in line and '<' in line:
+                m = re.search(r'(\w+)\s*<\s*([\d.]+)', line)
+                if m:
+                    config['maf_field'] = m.group(1)
+                    config['maf_threshold'] = m.group(2)
+            elif 'cID:' in line:
+                m = re.search(r'cID:\s*(\d+)', line)
+                if m:
+                    config['cid'] = int(m.group(1))
+    return config
+
+
+def generate_pm1_rules(pm1_path, prod_qual, prod_dp, prod_gq):
+    """Generate PM1 hotspot region rules with production QC thresholds."""
+    regions = load_pm1_regions(pm1_path)
+    config = parse_pm1_header(pm1_path)
+
+    rules = []
+    for region in regions:
+        for consequence in config['consequences']:
+            rule_text = (
+                f"SYMBOL == {config['gene']}"
+                f" && Consequence == {consequence}"
+                f" && protein_pos_start >= {region['start']}"
+                f" && protein_pos_end <= {region['end']}"
+                f" && {config['maf_field']} < {config['maf_threshold']}"
+                f" && QUAL >= {prod_qual}"
+                f" && format_DP >= {prod_dp}"
+                f" && format_GQ >= {prod_gq}"
+            )
+            rules.append(f"{config['disease']}\t{rule_text}\t{config['cid']}\t>=\t1")
+    return rules
+
+
 def generate_devel_only_gene_rules(genes, templates, devel_qual, devel_dp, devel_gq, frequency_template, cid_start):
     """Generate rules for devel-only genes using rule templates."""
     rules = []
@@ -123,6 +202,65 @@ def generate_devel_only_gene_rules(genes, templates, devel_qual, devel_dp, devel
     return rules
 
 
+def update_summary_report(summary_path, total_rules, prod_rules, devel_dup_count, devel_gene_count, devel_gene_list_count, pm1_prod_count, pm1_devel_count, skipped_no_qc):
+    """Update SUMMARY_REPORT.md with devel/PM1 rule counts."""
+    with open(summary_path) as f:
+        content = f.read()
+
+    # Update "Total Rules Generated" line
+    content = re.sub(
+        r'\*\*Total Rules Generated:\*\* [\d,]+',
+        f'**Total Rules Generated:** {total_rules:,}',
+        content
+    )
+
+    # Update Summary Overview table: replace "Current" column for Total Rules
+    content = re.sub(
+        r'(\|Total Rules\s+\|[^|]+\|)\s*[\d,]+(\|)',
+        lambda m: f'{m.group(1)} {total_rules:,}{m.group(2)}',
+        content
+    )
+
+    # Recalculate change for Total Rules row
+    def fix_total_rules_change(m):
+        prev_str = m.group(1).strip().replace(',', '')
+        prev = int(prev_str)
+        change = total_rules - prev
+        sign = '+' if change > 0 else ''
+        return f'|Total Rules    | {prev:>7,}| {total_rules:>6,}| {sign}{change}|'
+    content = re.sub(
+        r'\|Total Rules\s+\|\s*([\d,]+)\|[^|]+\|[^|]+\|',
+        fix_total_rules_change,
+        content
+    )
+
+    # Add devel/PM1 section before "## Rule Types Analysis" or at the end
+    devel_section = f"""
+## Devel & PM1 Post-Processing
+*Added by `generate_devel_rules.py` after base rule generation*
+
+|Category                     |  Count|
+|:----------------------------|------:|
+|Production rules (base)      | {prod_rules:,}|
+|Devel duplicates (lower QC)  | {devel_dup_count:,}|
+|Devel-only gene rules        | {devel_gene_count:,} ({devel_gene_list_count} genes)|
+|PM1 production rules (cID 9999) | {pm1_prod_count:,}|
+|PM1 devel rules (cID 109999) | {pm1_devel_count:,}|
+|Skipped (no QC filters)      | {skipped_no_qc:,}|
+|**Total rules in file**      | **{total_rules:,}**|
+
+"""
+    if '## Rule Types Analysis' in content:
+        content = content.replace('## Rule Types Analysis', devel_section + '## Rule Types Analysis')
+    else:
+        content += devel_section
+
+    with open(summary_path, 'w') as f:
+        f.write(content)
+
+    print(f"  Summary report updated: {summary_path}")
+
+
 def main():
     parser = argparse.ArgumentParser(description='Generate devel_ prefixed rules with lower QC thresholds')
     parser.add_argument('--rules-file', required=True, help='Input rules TSV file')
@@ -130,6 +268,8 @@ def main():
     parser.add_argument('--devel-genes', required=True, help='Path to devel_only_genes.tsv')
     parser.add_argument('--rules-templates-dir', required=True, help='Path to config/rules/ directory')
     parser.add_argument('--output-file', required=True, help='Output rules TSV file')
+    parser.add_argument('--pm1-regions', required=False, help='Path to PM1 hotspot regions TSV (optional)')
+    parser.add_argument('--summary-report', required=False, help='Path to SUMMARY_REPORT.md to update with devel/PM1 stats')
     args = parser.parse_args()
 
     settings = load_devel_settings(args.devel_config)
@@ -193,19 +333,55 @@ def main():
 
     print(f"  Devel-only gene rules: {len(devel_gene_rules)} ({len(devel_genes)} genes)")
 
+    # PM1 hotspot region rules
+    pm1_rules = []
+    pm1_devel_rules = []
+    if args.pm1_regions and os.path.exists(args.pm1_regions):
+        print(f"\n  --- PM1 Hotspot Region Rules ---")
+        pm1_rules = generate_pm1_rules(args.pm1_regions, '22.4', '8', '16')
+        print(f"  PM1 production rules: {len(pm1_rules)}")
+
+        pm1_config = parse_pm1_header(args.pm1_regions)
+        for rule_line in pm1_rules:
+            parts = rule_line.split('\t')
+            disease, rule_text, cid_str, ccond, cthresh = parts[0], parts[1], parts[2], parts[3], parts[4]
+            new_disease = f"devel_{disease}"
+            new_rule = substitute_qc(rule_text, '22.4', '8', '16', devel_qual, devel_dp, devel_gq)
+            new_cid = str(int(cid_str) + cid_offset)
+            pm1_devel_rules.append(f"{new_disease}\t{new_rule}\t{new_cid}\t{ccond}\t{cthresh}")
+        print(f"  PM1 devel rules: {len(pm1_devel_rules)}")
+
     # Write combined output
-    total = len(original_rules) + len(devel_duplicates) + len(devel_gene_rules)
+    total = len(original_rules) + len(devel_duplicates) + len(devel_gene_rules) + len(pm1_rules) + len(pm1_devel_rules)
     with open(args.output_file, 'w') as f:
         f.write(header + '\n')
         for rule in original_rules:
+            f.write(rule + '\n')
+        for rule in pm1_rules:
             f.write(rule + '\n')
         for rule in devel_duplicates:
             f.write(rule + '\n')
         for rule in devel_gene_rules:
             f.write(rule + '\n')
+        for rule in pm1_devel_rules:
+            f.write(rule + '\n')
 
     print(f"\n  Total rules in output: {total}")
     print(f"  Output file: {args.output_file}")
+
+    if args.summary_report and os.path.exists(args.summary_report):
+        update_summary_report(
+            args.summary_report,
+            total_rules=total,
+            prod_rules=len(original_rules),
+            devel_dup_count=len(devel_duplicates),
+            devel_gene_count=len(devel_gene_rules),
+            devel_gene_list_count=len(devel_genes),
+            pm1_prod_count=len(pm1_rules),
+            pm1_devel_count=len(pm1_devel_rules),
+            skipped_no_qc=skipped,
+        )
+
     print("=" * 80)
 
 

@@ -517,12 +517,25 @@ if [ $exit_code -eq 0 ]; then
             exit 1
         fi
         
-        python3 "$DEVEL_SCRIPT" \
+        DEVEL_CMD=(python3 "$DEVEL_SCRIPT" \
             --rules-file "$RULES_FILE" \
             --devel-config "$DEVEL_SETTINGS" \
             --devel-genes "$DEVEL_GENES" \
             --rules-templates-dir "$RULES_TEMPLATES" \
-            --output-file "$RULES_FILE"
+            --output-file "$RULES_FILE")
+        
+        PM1_REGIONS="$DEVEL_CONFIG_DIR/acadvl_pm1_regions.tsv"
+        if [[ -f "$PM1_REGIONS" ]]; then
+            print_status "PM1 hotspot regions config found, adding PM1 rules..."
+            DEVEL_CMD+=(--pm1-regions "$PM1_REGIONS")
+        fi
+        
+        SUMMARY_REPORT="$TARGET_DIR/SUMMARY_REPORT.md"
+        if [[ -f "$SUMMARY_REPORT" ]]; then
+            DEVEL_CMD+=(--summary-report "$SUMMARY_REPORT")
+        fi
+        
+        "${DEVEL_CMD[@]}"
         
         devel_exit_code=$?
         if [ $devel_exit_code -eq 0 ]; then
