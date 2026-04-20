@@ -38,6 +38,27 @@ format_percentage <- function(x) {
   paste0(round(x * 100, 1), "%")
 }
 
+#' Basename of archived master gene list xlsx under inputs/.
+#' Convention: master_gene_list*.xlsx; else version_metadata$input_files$master_gene_list if present;
+#' else first .xlsx whose name does not contain "variant" (variant supplemental list).
+find_archived_master_gene_xlsx <- function(inputs_dir, version_metadata = NULL) {
+  if (!dir.exists(inputs_dir)) return(character(0))
+  by_pattern <- list.files(inputs_dir, pattern = "master_gene_list.*\\.xlsx$", full.names = FALSE)
+  if (length(by_pattern) > 0) return(by_pattern[[1]])
+  meta_name <- NULL
+  if (!is.null(version_metadata) && !is.null(version_metadata$input_files)) {
+    meta_name <- version_metadata$input_files$master_gene_list
+  }
+  if (!is.null(meta_name) && length(meta_name) > 0) {
+    mn <- as.character(meta_name)[[1]]
+    if (nzchar(mn) && file.exists(file.path(inputs_dir, mn))) return(mn)
+  }
+  all_x <- list.files(inputs_dir, pattern = "\\.xlsx$", full.names = FALSE)
+  non_variant <- all_x[!grepl("variant", all_x, ignore.case = TRUE)]
+  if (length(non_variant) > 0) return(non_variant[[1]])
+  character(0)
+}
+
 #' Generate input statistics from prepared data
 #' @param prepared_data Pre-loaded and column-mapped data from load_excel_files
 #' @return List containing input statistics
@@ -502,12 +523,12 @@ generate_report_content <- function(version_dir, rules_analysis, previous_rules_
     )
     
     if (dir.exists(current_inputs_dir)) {
-      current_gene_files <- list.files(current_inputs_dir, pattern = "master_gene_list.*\\.xlsx$", full.names = FALSE)
+      current_gene_file <- find_archived_master_gene_xlsx(current_inputs_dir, version_metadata)
       current_variant_files <- list.files(current_inputs_dir, pattern = ".*variant.*\\.xlsx$", full.names = FALSE)
       
       file_status_list[["Current Gene List"]] <- list(
-        path = if (length(current_gene_files) > 0) paste0(version_num, "/inputs/", current_gene_files[1]) else paste0(version_num, "/inputs/[no gene list found]"),
-        status = if (length(current_gene_files) > 0) "✅ EXISTS" else "❌ MISSING"
+        path = if (length(current_gene_file) > 0) paste0(version_num, "/inputs/", current_gene_file) else paste0(version_num, "/inputs/[no gene list found]"),
+        status = if (length(current_gene_file) > 0) "✅ EXISTS" else "❌ MISSING"
       )
       
       file_status_list[["Current Variant List"]] <- list(
@@ -566,7 +587,10 @@ generate_report_content <- function(version_dir, rules_analysis, previous_rules_
     }
     
     if (!is.null(compared_inputs_dir) && dir.exists(compared_inputs_dir)) {
-      gene_files <- list.files(compared_inputs_dir, pattern = "master_gene_list.*\\.xlsx$", full.names = FALSE)
+      previous_metadata <- NULL
+      prev_meta_file <- file.path(compared_version_dir, "version_metadata.json")
+      if (file.exists(prev_meta_file)) previous_metadata <- load_json_file(prev_meta_file)
+      gene_files <- find_archived_master_gene_xlsx(compared_inputs_dir, previous_metadata)
       variant_files <- list.files(compared_inputs_dir, pattern = ".*variant.*\\.xlsx$", full.names = FALSE)
       
       # Get relative path for display
