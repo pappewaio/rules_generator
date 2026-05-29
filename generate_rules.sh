@@ -478,6 +478,96 @@ exit_code=$?
 
 if [ $exit_code -eq 0 ]; then
     print_success "Rules generation completed successfully!"
+
+    # Find the rules file once for any post-processing steps
+    RULES_FILE=$(find "$TARGET_DIR/outputs" -name "*_rules_file_from_carrier_list_nr_*.tsv" -type f 2>/dev/null | head -1)
+    if [[ -z "$RULES_FILE" ]]; then
+        print_error "Could not find rules file in $TARGET_DIR/outputs/"
+        exit 1
+    fi
+
+    SUMMARY_REPORT="$TARGET_DIR/SUMMARY_REPORT.md"
+
+    # Normalize rules file to include ACMG_criteria column
+    print_status "Ensuring ACMG_criteria column is present..."
+
+    ACMG_COLUMN_SCRIPT="$FRAMEWORK_DIR/bin/ensure_acmg_criteria_column.py"
+    if [[ ! -f "$ACMG_COLUMN_SCRIPT" ]]; then
+        print_error "ACMG column normalization script not found: $ACMG_COLUMN_SCRIPT"
+        exit 1
+    fi
+
+    ACMG_COLUMN_CMD=(python3 "$ACMG_COLUMN_SCRIPT" \
+        --rules-file "$RULES_FILE" \
+        --output-file "$RULES_FILE")
+
+    "${ACMG_COLUMN_CMD[@]}"
+
+    acmg_column_exit_code=$?
+    if [ $acmg_column_exit_code -eq 0 ]; then
+        print_success "ACMG_criteria column normalization completed successfully!"
+    else
+        print_error "ACMG column normalization failed with exit code: $acmg_column_exit_code"
+        exit $acmg_column_exit_code
+    fi
+
+    # ACMG rules post-processing if config is present
+    ACMG_CONFIG_DIR="$TARGET_DIR/inputs/config/acmg"
+    if [[ -d "$ACMG_CONFIG_DIR" ]]; then
+        print_status "Adding ACMG rules from config/acmg..."
+
+        ACMG_SCRIPT="$FRAMEWORK_DIR/bin/generate_acmg_rules.py"
+        if [[ ! -f "$ACMG_SCRIPT" ]]; then
+            print_error "ACMG rules script not found: $ACMG_SCRIPT"
+            exit 1
+        fi
+
+        ACMG_CMD=(python3 "$ACMG_SCRIPT" \
+            --rules-file "$RULES_FILE" \
+            --acmg-config-dir "$ACMG_CONFIG_DIR" \
+            --output-file "$RULES_FILE")
+
+        if [[ -f "$SUMMARY_REPORT" ]]; then
+            ACMG_CMD+=(--summary-report "$SUMMARY_REPORT")
+        fi
+
+        "${ACMG_CMD[@]}"
+
+        acmg_exit_code=$?
+        if [ $acmg_exit_code -eq 0 ]; then
+            print_success "ACMG rules added successfully!"
+        else
+            print_error "ACMG rules generation failed with exit code: $acmg_exit_code"
+            exit $acmg_exit_code
+        fi
+    fi
+
+    # ClinVar aggregate companion rule post-processing
+    print_status "Adding ClinVar aggregate companion rules..."
+
+    CLINVAR_AGGREGATE_SCRIPT="$FRAMEWORK_DIR/bin/generate_clinvar_aggregate_rules.py"
+    if [[ ! -f "$CLINVAR_AGGREGATE_SCRIPT" ]]; then
+        print_error "ClinVar aggregate rules script not found: $CLINVAR_AGGREGATE_SCRIPT"
+        exit 1
+    fi
+
+    CLINVAR_AGGREGATE_CMD=(python3 "$CLINVAR_AGGREGATE_SCRIPT" \
+        --rules-file "$RULES_FILE" \
+        --output-file "$RULES_FILE")
+
+    if [[ -f "$SUMMARY_REPORT" ]]; then
+        CLINVAR_AGGREGATE_CMD+=(--summary-report "$SUMMARY_REPORT")
+    fi
+
+    "${CLINVAR_AGGREGATE_CMD[@]}"
+
+    clinvar_aggregate_exit_code=$?
+    if [ $clinvar_aggregate_exit_code -eq 0 ]; then
+        print_success "ClinVar aggregate companion rules added successfully!"
+    else
+        print_error "ClinVar aggregate rules generation failed with exit code: $clinvar_aggregate_exit_code"
+        exit $clinvar_aggregate_exit_code
+    fi
     
     # Devel rules post-processing if requested
     if $DEVEL_RULES; then
@@ -488,14 +578,7 @@ if [ $exit_code -eq 0 ]; then
             print_error "Devel rules script not found: $DEVEL_SCRIPT"
             exit 1
         fi
-        
-        # Find the rules file in the output directory
-        RULES_FILE=$(find "$TARGET_DIR/outputs" -name "*_rules_file_from_carrier_list_nr_*.tsv" -type f 2>/dev/null | head -1)
-        if [[ -z "$RULES_FILE" ]]; then
-            print_error "Could not find rules file in $TARGET_DIR/outputs/"
-            exit 1
-        fi
-        
+
         # Find devel config in the input config directory
         DEVEL_CONFIG_DIR="$TARGET_DIR/inputs/config/devel"
         if [[ ! -d "$DEVEL_CONFIG_DIR" ]]; then
@@ -529,8 +612,7 @@ if [ $exit_code -eq 0 ]; then
             print_status "PM1 hotspot regions config found, adding PM1 rules..."
             DEVEL_CMD+=(--pm1-regions "$PM1_REGIONS")
         fi
-        
-        SUMMARY_REPORT="$TARGET_DIR/SUMMARY_REPORT.md"
+
         if [[ -f "$SUMMARY_REPORT" ]]; then
             DEVEL_CMD+=(--summary-report "$SUMMARY_REPORT")
         fi

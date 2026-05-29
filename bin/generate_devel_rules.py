@@ -158,7 +158,7 @@ def generate_pm1_rules(pm1_path, prod_qual, prod_dp, prod_gq):
                 f" && format_DP >= {prod_dp}"
                 f" && format_GQ >= {prod_gq}"
             )
-            rules.append(f"{config['disease']}\t{rule_text}\t{config['cid']}\t>=\t1")
+            rules.append(f"{config['disease']}\t{rule_text}\t{config['cid']}\t>=\t1\t")
     return rules
 
 
@@ -180,7 +180,7 @@ def generate_devel_only_gene_rules(genes, templates, devel_qual, devel_dp, devel
 
         gene_rule = f"SYMBOL == {gene}"
         spliceai_gene_rule = f"SpliceAI_pred_SYMBOL == {gene}"
-        inheritance_rule = f"{cid}\t>=\t{cthresh}"
+        inheritance_rule = f"{cid}\t>=\t{cthresh}\t"
 
         # non_splice_pos_rules (frameshift/stop_gained with position)
         for template in templates.get('non_splice_pos_rules', []):
@@ -303,6 +303,7 @@ def main():
             continue
 
         disease, rule_text, cid_str, ccond, cthresh = parts[0], parts[1], parts[2], parts[3], parts[4]
+        acmg_criteria = parts[5] if len(parts) > 5 else ''
 
         has_qc = 'QUAL >=' in rule_text
         if not has_qc:
@@ -312,7 +313,7 @@ def main():
         new_disease = f"devel_{disease}"
         new_rule = substitute_qc(rule_text, '22.4', '8', '16', devel_qual, devel_dp, devel_gq)
         new_cid = str(int(cid_str) + cid_offset)
-        devel_duplicates.append(f"{new_disease}\t{new_rule}\t{new_cid}\t{ccond}\t{cthresh}")
+        devel_duplicates.append(f"{new_disease}\t{new_rule}\t{new_cid}\t{ccond}\t{cthresh}\t{acmg_criteria}")
 
     print(f"  Devel duplicates: {len(devel_duplicates)} (skipped {skipped} rules without QC filters)")
 
@@ -345,10 +346,11 @@ def main():
         for rule_line in pm1_rules:
             parts = rule_line.split('\t')
             disease, rule_text, cid_str, ccond, cthresh = parts[0], parts[1], parts[2], parts[3], parts[4]
+            acmg_criteria = parts[5] if len(parts) > 5 else ''
             new_disease = f"devel_{disease}"
             new_rule = substitute_qc(rule_text, '22.4', '8', '16', devel_qual, devel_dp, devel_gq)
             new_cid = str(int(cid_str) + cid_offset)
-            pm1_devel_rules.append(f"{new_disease}\t{new_rule}\t{new_cid}\t{ccond}\t{cthresh}")
+            pm1_devel_rules.append(f"{new_disease}\t{new_rule}\t{new_cid}\t{ccond}\t{cthresh}\t{acmg_criteria}")
         print(f"  PM1 devel rules: {len(pm1_devel_rules)}")
 
     # Write combined output
