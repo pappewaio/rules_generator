@@ -627,6 +627,40 @@ if [ $exit_code -eq 0 ]; then
             exit $devel_exit_code
         fi
     fi
+
+    # Refresh summary sections that depend on the final post-processed rules TSV.
+    SUMMARY_REFRESH_SCRIPT="$FRAMEWORK_DIR/bin/refresh_summary_rule_sections.py"
+    if [[ -f "$SUMMARY_REFRESH_SCRIPT" ]]; then
+        print_status "Refreshing rule-derived summary sections from final rules file..."
+        SUMMARY_REFRESH_CMD=(python3 "$SUMMARY_REFRESH_SCRIPT" \
+            --rules-file "$RULES_FILE" \
+            --summary-report "$SUMMARY_REPORT")
+
+        if [[ -n "$COMPARE_WITH_VERSION_NUM" ]]; then
+            compare_base_version=$(echo "$COMPARE_WITH_VERSION_NUM" | sed 's/[A-Za-z].*$//')
+            compare_version_dir="$OUTPUT_DIR/version_$compare_base_version"
+            if [[ "$COMPARE_WITH_VERSION_NUM" =~ ^[0-9]+[A-Za-z]+$ ]]; then
+                compare_version_dir="$compare_version_dir/step_$COMPARE_WITH_VERSION_NUM"
+            fi
+
+            PREVIOUS_RULES_FILE=$(find "$compare_version_dir/outputs" -name "*_rules_file_from_carrier_list_nr_*.tsv" -type f 2>/dev/null | head -1)
+            if [[ -n "$PREVIOUS_RULES_FILE" ]]; then
+                SUMMARY_REFRESH_CMD+=(--previous-rules-file "$PREVIOUS_RULES_FILE")
+            fi
+        fi
+
+        "${SUMMARY_REFRESH_CMD[@]}"
+        summary_refresh_exit_code=$?
+        if [ $summary_refresh_exit_code -eq 0 ]; then
+            print_success "Rule-derived summary sections refreshed successfully!"
+        else
+            print_error "Summary section refresh failed with exit code: $summary_refresh_exit_code"
+            exit $summary_refresh_exit_code
+        fi
+    else
+        print_error "Summary refresh script not found: $SUMMARY_REFRESH_SCRIPT"
+        exit 1
+    fi
     
     # S3 deployment if requested
     if [[ -n "$S3_VERSION" ]]; then

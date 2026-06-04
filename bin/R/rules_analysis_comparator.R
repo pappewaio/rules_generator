@@ -39,13 +39,19 @@ compare_rule_types <- function(current_analysis, previous_analysis = NULL) {
   # Calculate changes
   changes <- current_counts - previous_counts
   
-  # Add totals row
-  total_previous <- sum(previous_counts)
-  total_current <- sum(current_counts)
+  # Add totals row using actual unique rule counts.
+  # Rule type categories overlap (for example a SpliceAI rule can also be a
+  # splice-site rule), so summing the category counts overstates the true total.
+  total_previous <- if (!is.null(previous_analysis) && !is.null(previous_analysis$total_rules)) {
+    previous_analysis$total_rules
+  } else {
+    0
+  }
+  total_current <- if (!is.null(current_analysis$total_rules)) current_analysis$total_rules else sum(current_counts)
   total_change <- total_current - total_previous
   
   rule_types_df <- data.frame(
-    "Rule Type" = c(rule_type_names, "**TOTAL**"),
+    "Rule Type" = c(rule_type_names, "**Unique Rules (actual)**"),
     "Previous" = c(sapply(previous_counts, format_number), format_number(total_previous)),
     "Current" = c(sapply(current_counts, format_number), format_number(total_current)),
     "Change" = c(sapply(changes, function(x) {
@@ -62,6 +68,7 @@ compare_rule_types <- function(current_analysis, previous_analysis = NULL) {
   analysis_text <- character()
   if (total_change != 0 && !is.null(previous_analysis)) {
     analysis_text <- c(analysis_text, "**Rule Type Changes Analysis:**")
+    analysis_text <- c(analysis_text, "- Rule type categories overlap, so the final row shows the actual unique rule count rather than the sum of category rows.")
     
     # Find categories with changes
     changed_categories <- rule_type_names[changes != 0]
