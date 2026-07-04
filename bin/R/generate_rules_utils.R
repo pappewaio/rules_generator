@@ -83,6 +83,18 @@ copy_input_files <- function(version_dir, gene_list_path, variant_list_path, var
     } else if (!is.null(variantcall_database_path)) {
       log_warning(logger, paste("VariantCall database file not found:", variantcall_database_path))
     }
+
+    # Copy optional ACMG ops rules file if present beside the input spreadsheets
+    input_dir <- dirname(gene_list_path)
+    acmg_ops_filename <- "acmg_ops_rules.tsv"
+    acmg_ops_source_path <- file.path(input_dir, acmg_ops_filename)
+    if (file.exists(acmg_ops_source_path)) {
+      dest_acmg_ops_path <- file.path(inputs_dir, acmg_ops_filename)
+      file.copy(acmg_ops_source_path, dest_acmg_ops_path, overwrite = TRUE)
+      log_info(logger, paste("✅ Copied ACMG ops rules to:", dest_acmg_ops_path))
+    } else {
+      log_info(logger, paste("No ACMG ops rules file found at:", acmg_ops_source_path))
+    }
     
     # Copy current config directory for historical reproducibility
     config_dest_dir <- file.path(inputs_dir, "config")
@@ -455,6 +467,7 @@ DEPLOY_RULES_NAME_PATTERN="%s"
 RULES_FILE=$(ls "$OUTPUT_DIR"/outputs/*_rules_file_from_carrier_list_nr_*.tsv 2>/dev/null | head -1)
 JSON_FILE="$OUTPUT_DIR/outputs/list_of_analyzed_genes_science_pipeline_names.json"
 METADATA_FILE=$(ls "$OUTPUT_DIR"/outputs/*_disease_gene_metadata.tsv 2>/dev/null | head -1)
+ACMG_OPS_FILE="$OUTPUT_DIR/inputs/acmg_ops_rules.tsv"
 
 if [[ -z "$RULES_FILE" || ! -f "$RULES_FILE" ]]; then
     echo "Error: No rules file found in $OUTPUT_DIR/outputs/"
@@ -483,6 +496,9 @@ done
 if [[ -n "$METADATA_FILE" && -f "$METADATA_FILE" ]]; then
     echo "  ✅ $(basename "$METADATA_FILE") - $(du -h "$METADATA_FILE" | cut -f1)"
 fi
+if [[ -f "$ACMG_OPS_FILE" ]]; then
+    echo "  ✅ $(basename "$ACMG_OPS_FILE") - $(du -h "$ACMG_OPS_FILE" | cut -f1)"
+fi
 
 echo ""
 echo "Rules file details:"
@@ -493,7 +509,15 @@ echo ""
 # --- Rename rules file for deployment ---
 TEMP_RULES_FILE="$(dirname "$RULES_FILE")/$DEPLOY_RULES_NAME"
 cp "$RULES_FILE" "$TEMP_RULES_FILE"
+TEMP_ACMG_OPS_FILE=""
+if [[ -f "$ACMG_OPS_FILE" ]]; then
+    TEMP_ACMG_OPS_FILE="$(dirname "$RULES_FILE")/${DATE_PREFIX}_acmg_ops_rules.tsv"
+    cp "$ACMG_OPS_FILE" "$TEMP_ACMG_OPS_FILE"
+fi
 echo "Renamed: $(basename "$RULES_FILE") -> $DEPLOY_RULES_NAME"
+if [[ -n "$TEMP_ACMG_OPS_FILE" ]]; then
+    echo "Renamed: $(basename "$ACMG_OPS_FILE") -> $(basename "$TEMP_ACMG_OPS_FILE")"
+fi
 echo ""
 
 # --- Upload to S3 ---
@@ -511,6 +535,10 @@ if [[ "$DEPLOY_ENV" == "production" ]]; then
         echo "  Deploying disease-gene metadata..."
         aws s3 cp "$METADATA_FILE" "$S3_BASE/disease_gene_metadata_main/"
     fi
+    if [[ -n "$TEMP_ACMG_OPS_FILE" && -f "$TEMP_ACMG_OPS_FILE" ]]; then
+        echo "  Deploying ACMG ops rules..."
+        aws s3 cp "$TEMP_ACMG_OPS_FILE" "$S3_BASE/acmg_ops_main/"
+    fi
 else
     echo "  Deploying rules file..."
     aws s3 cp "$TEMP_RULES_FILE" "$S3_BUCKET/"
@@ -522,10 +550,17 @@ else
         echo "  Deploying disease-gene metadata..."
         aws s3 cp "$METADATA_FILE" "$S3_BUCKET/"
     fi
+    if [[ -n "$TEMP_ACMG_OPS_FILE" && -f "$TEMP_ACMG_OPS_FILE" ]]; then
+        echo "  Deploying ACMG ops rules..."
+        aws s3 cp "$TEMP_ACMG_OPS_FILE" "$S3_BUCKET/"
+    fi
 fi
 
 # --- Cleanup ---
 rm "$TEMP_RULES_FILE"
+if [[ -n "$TEMP_ACMG_OPS_FILE" && -f "$TEMP_ACMG_OPS_FILE" ]]; then
+    rm "$TEMP_ACMG_OPS_FILE"
+fi
 
 # --- Summary ---
 echo ""
@@ -538,11 +573,17 @@ if [[ "$DEPLOY_ENV" == "production" ]]; then
     if [[ -n "$METADATA_FILE" && -f "$METADATA_FILE" ]]; then
         echo "  🧬 Metadata: $S3_BASE/disease_gene_metadata_main/$(basename "$METADATA_FILE")"
     fi
+    if [[ -n "$TEMP_ACMG_OPS_FILE" ]]; then
+        echo "  🧾 ACMG ops: $S3_BASE/acmg_ops_main/$(basename "$TEMP_ACMG_OPS_FILE")"
+    fi
 else
     echo "  📋 Rules:    $S3_BUCKET/$DEPLOY_RULES_NAME"
     echo "  📊 JSON:     $S3_BUCKET/$(basename "$JSON_FILE")"
     if [[ -n "$METADATA_FILE" && -f "$METADATA_FILE" ]]; then
         echo "  🧬 Metadata: $S3_BUCKET/$(basename "$METADATA_FILE")"
+    fi
+    if [[ -n "$TEMP_ACMG_OPS_FILE" ]]; then
+        echo "  🧾 ACMG ops: $S3_BUCKET/$(basename "$TEMP_ACMG_OPS_FILE")"
     fi
 fi
 ', rules_version, deploy_env, s3_bucket, s3_version, deploy_rules_name, rules_version)
