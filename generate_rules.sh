@@ -543,30 +543,51 @@ if [ $exit_code -eq 0 ]; then
     fi
 
     # ClinVar aggregate companion rule post-processing
-    print_status "Adding ClinVar aggregate companion rules..."
-
-    CLINVAR_AGGREGATE_SCRIPT="$FRAMEWORK_DIR/bin/generate_clinvar_aggregate_rules.py"
-    if [[ ! -f "$CLINVAR_AGGREGATE_SCRIPT" ]]; then
-        print_error "ClinVar aggregate rules script not found: $CLINVAR_AGGREGATE_SCRIPT"
-        exit 1
+    CLINVAR_AGGREGATE_ENABLED=true
+    CLINVAR_AGGREGATE_CONFIG="$TARGET_DIR/inputs/config/clinvar_aggregate.conf"
+    if [[ -f "$CLINVAR_AGGREGATE_CONFIG" ]]; then
+        print_status "Loading ClinVar aggregate rules config from: $CLINVAR_AGGREGATE_CONFIG"
+        configured_value=$(sed -n 's/^ENABLE_CLINVAR_AGGREGATE_RULES=\(.*\)$/\1/p' "$CLINVAR_AGGREGATE_CONFIG" | tail -1 | tr -d '[:space:]')
+        if [[ -n "$configured_value" ]]; then
+            configured_value=$(echo "$configured_value" | tr '[:upper:]' '[:lower:]')
+            if [[ "$configured_value" == "false" ]]; then
+                CLINVAR_AGGREGATE_ENABLED=false
+            elif [[ "$configured_value" != "true" ]]; then
+                print_error "Invalid ENABLE_CLINVAR_AGGREGATE_RULES value in $CLINVAR_AGGREGATE_CONFIG: $configured_value"
+                print_error "Expected true or false"
+                exit 1
+            fi
+        fi
     fi
 
-    CLINVAR_AGGREGATE_CMD=(python3 "$CLINVAR_AGGREGATE_SCRIPT" \
-        --rules-file "$RULES_FILE" \
-        --output-file "$RULES_FILE")
+    if $CLINVAR_AGGREGATE_ENABLED; then
+        print_status "Adding ClinVar aggregate companion rules..."
 
-    if [[ -f "$SUMMARY_REPORT" ]]; then
-        CLINVAR_AGGREGATE_CMD+=(--summary-report "$SUMMARY_REPORT")
-    fi
+        CLINVAR_AGGREGATE_SCRIPT="$FRAMEWORK_DIR/bin/generate_clinvar_aggregate_rules.py"
+        if [[ ! -f "$CLINVAR_AGGREGATE_SCRIPT" ]]; then
+            print_error "ClinVar aggregate rules script not found: $CLINVAR_AGGREGATE_SCRIPT"
+            exit 1
+        fi
 
-    "${CLINVAR_AGGREGATE_CMD[@]}"
+        CLINVAR_AGGREGATE_CMD=(python3 "$CLINVAR_AGGREGATE_SCRIPT" \
+            --rules-file "$RULES_FILE" \
+            --output-file "$RULES_FILE")
 
-    clinvar_aggregate_exit_code=$?
-    if [ $clinvar_aggregate_exit_code -eq 0 ]; then
-        print_success "ClinVar aggregate companion rules added successfully!"
+        if [[ -f "$SUMMARY_REPORT" ]]; then
+            CLINVAR_AGGREGATE_CMD+=(--summary-report "$SUMMARY_REPORT")
+        fi
+
+        "${CLINVAR_AGGREGATE_CMD[@]}"
+
+        clinvar_aggregate_exit_code=$?
+        if [ $clinvar_aggregate_exit_code -eq 0 ]; then
+            print_success "ClinVar aggregate companion rules added successfully!"
+        else
+            print_error "ClinVar aggregate rules generation failed with exit code: $clinvar_aggregate_exit_code"
+            exit $clinvar_aggregate_exit_code
+        fi
     else
-        print_error "ClinVar aggregate rules generation failed with exit code: $clinvar_aggregate_exit_code"
-        exit $clinvar_aggregate_exit_code
+        print_warning "ClinVar aggregate companion rules are disabled for this step"
     fi
     
     # Devel rules post-processing if requested
