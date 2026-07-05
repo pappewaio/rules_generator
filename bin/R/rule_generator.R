@@ -520,24 +520,27 @@ generate_special_rules <- function(gene_rule, disease_name, gene, cutoff_list, f
     strings <- c(strings, strings_1, strings_2)
   }
   
-  # Handle INCLUDE rules
+  # Handle INCLUDE rules - standard missense/nonsense gene rules plus the listed variant(s).
+  # For "only this variant" behavior (no broad gene rules), use INCLUDE_ONLY instead.
   include_rules <- gene_disease_rules[gene_disease_rules$rule_type == "INCLUDE", ]
   if (nrow(include_rules) > 0) {
-    if (nrow(include_rules) == 1 && gene == "HBB" && disease_name == "Sickle_cell_disease") {
-      # Special case for sickle cell - only include this variant
-      include_rule <- paste0(" && HGVSc == ", include_rules$hgvs_variant, " ")
-      strings_1 <- paste(disease_name, paste0(gene_rule, include_rule, frequency_rule_special), inheritance_rule_special, sep = "\t")
-      strings <- c(strings, strings_1)
-    } else {
-      # General case - add standard rules plus specific variants
-      strings_1 <- paste(disease_name, paste0(gene_rule, config$rules$non_splice_pos_rules, exclusion_zone_rule, frequency_rule), inheritance_rule_special, sep = "\t")
-      strings_2 <- paste(disease_name, paste0(gene_rule, config$rules$non_splice_rules, frequency_rule), inheritance_rule_special, sep = "\t")
-      
-      include_variants <- paste0(" && HGVSc == ", include_rules$hgvs_variant, " ")
-      strings_3 <- paste(disease_name, paste0(gene_rule, include_variants, frequency_rule_special), inheritance_rule_special, sep = "\t")
-      
-      strings <- c(strings, strings_1, strings_2, strings_3)
-    }
+    strings_1 <- paste(disease_name, paste0(gene_rule, config$rules$non_splice_pos_rules, exclusion_zone_rule, frequency_rule), inheritance_rule_special, sep = "\t")
+    strings_2 <- paste(disease_name, paste0(gene_rule, config$rules$non_splice_rules, frequency_rule), inheritance_rule_special, sep = "\t")
+    
+    include_variants <- paste0(" && HGVSc == ", include_rules$hgvs_variant, " ")
+    strings_3 <- paste(disease_name, paste0(gene_rule, include_variants, frequency_rule_special), inheritance_rule_special, sep = "\t")
+    
+    strings <- c(strings, strings_1, strings_2, strings_3)
+  }
+  
+  # Handle INCLUDE_ONLY rules - restrict to exactly the listed variant(s),
+  # without emitting the broad missense/nonsense gene rules. One rule per
+  # variant, so multiple entries behave as an OR across the specific variants.
+  include_only_rules <- gene_disease_rules[gene_disease_rules$rule_type == "INCLUDE_ONLY", ]
+  if (nrow(include_only_rules) > 0) {
+    include_only_variants <- paste0(" && HGVSc == ", include_only_rules$hgvs_variant, " ")
+    strings_only <- paste(disease_name, paste0(gene_rule, include_only_variants, frequency_rule_special), inheritance_rule_special, sep = "\t")
+    strings <- c(strings, strings_only)
   }
   
   return(strings)
